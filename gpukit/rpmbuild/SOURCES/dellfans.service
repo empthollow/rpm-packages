@@ -1,0 +1,20 @@
+[Unit]
+Description=Dell R720 Dynamic Fan Speed Controller
+
+[Service]
+Type=simple
+User=root
+ExecStart=/usr/local/sbin/dellfans
+Restart=always
+RestartSec=10
+Environment="INTERVAL_SEC=5"
+Environment="INITIAL_START_DELAY_SEC=10"
+Environment="TEMP_THRESHOLD=35"
+Environment="MIN_FAN_PCT=10"
+Environment="MAX_FAN_PCT=100"
+Environment="GPU_COUNT=2"
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

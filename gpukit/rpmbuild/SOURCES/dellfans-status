@@ -1,0 +1,122 @@
+#!/bin/bash
+# Dell R720 Fan Controller Status Tool
+# Query fan speeds, temperatures, and service status
+
+set -euo pipefail
+
+SENSOR_INLET="04h"
+SENSOR_CPU1="0Eh"
+SENSOR_CPU2="0Fh"
+SERVICE_NAME="dellfans"
+
+usage() {
+    cat << EOF
+Usage: dellfans-status [OPTION]
+
+Options:
+  status      Show service status
+  temps       Show current temperatures
+  fans        Show fan speeds (PWM)
+  logs        Show recent service logs (last 20 lines)
+  all         Show all information
+  help        Display this help message
+
+Examples:
+  dellfans-status status
+  dellfans-status temps
+  dellfans-status logs -n 50  # Last 50 log lines
+  dellfans-status all
+
+EOF
+    exit 0
+}
+
+show_service_status() {
+    echo "=== Dellfans Service Status ==="
+    systemctl status "$SERVICE_NAME" --no-pager || true
+    echo ""
+}
+
+show_temps() {
+    echo "=== Current Temperatures ==="
+    
+    if [[ $EUID -ne 0 ]]; then
+        echo "⚠️  Root access required (run with sudo)"
+        echo ""
+        return
+    fi
+    
+    local inlet=$(ipmitool sdr type temperature 2>/dev/null | grep "$SENSOR_INLET" | cut -d"|" -f5 | awk '{print $1}' || echo "N/A")
+    local cpu1=$(ipmitool sdr type temperature 2>/dev/null | grep "$SENSOR_CPU1" | cut -d"|" -f5 | awk '{print $1}' || echo "N/A")
+    local cpu2=$(ipmitool sdr type temperature 2>/dev/null | grep "$SENSOR_CPU2" | cut -d"|" -f5 | awk '{print $1}' || echo "N/A")
+    
+    echo "Inlet Temp:  ${inlet}°C"
+    echo "CPU 1 Temp:  ${cpu1}°C"
+    echo "CPU 2 Temp:  ${cpu2}°C"
+    
+    if command -v nvidia-smi &> /dev/null; then
+        echo ""
+        echo "GPU Temperatures:"
+        if nvidia-smi --query-gpu=index,name,temperature.gpu --format=csv,noheader,nounits 2>/dev/null | grep -q '^[0-9]'; then
+            nvidia-smi --query-gpu=index,name,temperature.gpu --format=csv,noheader,nounits | while read -r idx name temp; do
+                echo "  GPU $idx ($name): ${temp}°C"
+            done
+        else
+            echo "  ⚠️  NVIDIA driver not loaded or GPUs not accessible"
+        fi
+    fi
+    echo ""
+}
+
+show_fans() {
+    echo "=== Fan Speeds (RPM) ==="
+    
+    if [[ $EUID -ne 0 ]]; then
+        echo "⚠️  Root access required (run with sudo)"
+        echo ""
+        return
+    fi
+    
+    ipmitool sensor list 2>/dev/null | grep -i "fan" | grep -v "Redundancy" | awk '{print $1, $2, $3}' || echo "Unable to read fan speeds"
+    echo ""
+}
+
+show_logs() {
+    local lines=${2:-20}
+    echo "=== Recent Service Logs (last $lines lines) ==="
+    journalctl -u "$SERVICE_NAME" -n "$lines" --no-pager || echo "No logs found"
+    echo ""
+}
+
+show_all() {
+    show_service_status
+    show_temps
+    show_fans
+    show_logs 10
+}
+
+# Parse arguments
+case "${1:-help}" in
+    status)
+        show_service_status
+        ;;
+    temps)
+        show_temps
+        ;;
+    fans)
+        show_fans
+        ;;
+    logs)
+        show_logs "${3:-20}"
+        ;;
+    all)
+        show_all
+        ;;
+    help|--help|-h)
+        usage
+        ;;
+    *)
+        echo "Unknown option: $1"
+        usage
+        ;;
+esac

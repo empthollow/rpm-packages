@@ -1,0 +1,143 @@
+#!/bin/bash
+# Dell R720 Dynamic Fan Speed Control
+# Uses local IPMI for temperature monitoring and GPU temp support
+# Configure via environment variables or systemd service
+
+set -euo pipefail
+
+# Configuration (can be overridden by environment variables)
+INTERVAL_SEC=${INTERVAL_SEC:-5}
+INITIAL_START_DELAY_SEC=${INITIAL_START_DELAY_SEC:-10}
+TEMP_THRESHOLD=${TEMP_THRESHOLD:-35}  # Above this, use factory auto
+MIN_FAN_PCT=${MIN_FAN_PCT:-10}
+MAX_FAN_PCT=${MAX_FAN_PCT:-100}
+GPU_COUNT=${GPU_COUNT:-2}  # Number of GPUs to monitor
+
+# IPMI sensor references
+INLET_TEMP_SENSOR="04h"   # Inlet Temp
+CPU1_TEMP_SENSOR="0Eh"    # CPU 1 Temp
+CPU2_TEMP_SENSOR="0Fh"    # CPU 2 Temp
+
+FCTRL=0  # 0=disabled (factory auto), 1=enabled (manual)
+LAST_PCT=0
+
+# Logging
+log() {
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*" | tee -a /var/log/dellfans.log
+}
+
+get_ipmi_temp() {
+    local sensor=$1
+    ipmitool sdr type temperature 2>/dev/null | grep "$sensor" | cut -d"|" -f5 | awk '{print $1}' | grep -E '^[0-9]+$' || echo "0"
+}
+
+get_gpu_temp() {
+    local gpu_index=$1
+    # Returns max temp across all processes on GPU, or 0 if unavailable
+    if command -v nvidia-smi &> /dev/null; then
+        nvidia-smi -i "$gpu_index" --query-gpu=temperature.gpu --format=csv,noheader,nounits 2>/dev/null || echo "0"
+    else
+        echo "0"
+    fi
+}
+
+get_max_temp() {
+    local temps=()
+    
+    # Get CPU/Inlet temps
+    temps+=($(get_ipmi_temp "$INLET_TEMP_SENSOR"))
+    temps+=($(get_ipmi_temp "$CPU1_TEMP_SENSOR"))
+    temps+=($(get_ipmi_temp "$CPU2_TEMP_SENSOR"))
+    
+    # Get GPU temps
+    for ((i = 0; i < GPU_COUNT; i++)); do
+        temps+=($(get_gpu_temp "$i"))
+    done
+    
+    # Find max, filtering out zeros (unavailable sensors)
+    local max_temp=0
+    for temp in "${temps[@]}"; do
+        if [[ $temp -gt $max_temp ]]; then
+            max_temp=$temp
+        fi
+    done
+    
+    echo "$max_temp"
+}
+
+toggle_manual_control() {
+    local state=$1  # 0x01 = manual, 0x00 = factory auto
+    ipmitool raw 0x30 0x30 0x01 "$state" 2>/dev/null || log "Warning: Failed to toggle manual control to $state"
+}
+
+set_fan_speed() {
+    local pct=$1
+    local hex=$(printf '0x%02x' "$pct")
+    ipmitool raw 0x30 0x30 0x02 0xff "$hex" 2>/dev/null || log "Warning: Failed to set fan speed to $pct%"
+}
+
+reset_to_factory_auto() {
+    if [[ $FCTRL -eq 1 ]]; then
+        log "Resetting to factory auto control"
+        toggle_manual_control 0x00
+        FCTRL=0
+    fi
+}
+
+set_manual_control() {
+    if [[ $FCTRL -eq 0 ]]; then
+        toggle_manual_control 0x01
+        FCTRL=1
+        log "Enabled manual fan control"
+    fi
+}
+
+graceful_exit() {
+    log "Shutting down - restoring factory auto control"
+    toggle_manual_control 0x01
+    exit 0
+}
+
+trap graceful_exit SIGINT SIGTERM EXIT
+
+# Main loop
+log "Starting Dell R720 fan controller (GPU_COUNT=$GPU_COUNT, INTERVAL=${INTERVAL_SEC}s, THRESHOLD=${TEMP_THRESHOLD}°C)"
+log "Initial startup delay: ${INITIAL_START_DELAY_SEC}s"
+sleep "$INITIAL_START_DELAY_SEC"
+
+# Reset to factory auto on start
+toggle_manual_control 0x00
+FCTRL=0
+
+while true; do
+    T=$(get_max_temp)
+    
+    if [[ -z "$T" ]] || [[ $T -eq 0 ]]; then
+        log "Warning: Could not read temperature - skipping this cycle"
+        sleep "$INTERVAL_SEC"
+        continue
+    fi
+    
+    if [[ $T -ge $TEMP_THRESHOLD ]]; then
+        reset_to_factory_auto
+    else
+        # Less aggressive curve below 80°C
+        if [[ $T -lt 80 ]]; then
+            PCT=$(( 3 * ( T / 5 ) ))  # ~0.6% per degree
+        else
+            PCT=$(( 5 * ( T / 5 ) ))  # ~1% per degree (more aggressive above 80°C)
+        fi
+        
+        PCT=$(( PCT < MIN_FAN_PCT ? MIN_FAN_PCT : PCT ))
+        PCT=$(( PCT > MAX_FAN_PCT ? MAX_FAN_PCT : PCT ))
+        
+        if [[ $LAST_PCT -ne $PCT ]]; then
+            set_manual_control
+            set_fan_speed "$PCT"
+            log "Temp: ${T}°C - Set fans to ${PCT}% (Inlet=$(get_ipmi_temp "$INLET_TEMP_SENSOR")°C, GPU0=$(get_gpu_temp 0)°C, GPU1=$(get_gpu_temp 1)°C)"
+            LAST_PCT=$PCT
+        fi
+    fi
+    
+    sleep "$INTERVAL_SEC"
+done

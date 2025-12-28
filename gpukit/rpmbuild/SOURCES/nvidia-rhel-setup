@@ -1,0 +1,296 @@
+#!/bin/bash
+
+# --- RHEL 9 Hardware Audit & NVIDIA Setup Script for Tesla P40 on Dell R720 ---
+
+# Function to display usage
+usage() {
+    cat << HELP
+Usage: $0 [OPTION]
+
+AUDIT & DRIVER INSTALLATION (No options):
+  (none)          Run hardware audit and install NVIDIA drivers
+
+POST-INSTALLATION OPTIONS:
+  --driver        Install NVIDIA Driver (skip audit)
+  --cuda          Install CUDA Toolkit
+  --cudnn         Install cuDNN (NVIDIA Deep Neural Network library)
+  --container     Install NVIDIA Container Toolkit
+  --all           Install CUDA, cuDNN, and Container Toolkit
+  --help          Display this help message
+
+Examples:
+  sudo $0                    # Run audit and driver installation
+  sudo $0 --driver          # Install driver only (skip audit)
+  sudo $0 --cuda            # Install CUDA Toolkit
+  sudo $0 --cudnn           # Install cuDNN
+  sudo $0 --container       # Install Container Toolkit
+  sudo $0 --all             # Install all post-driver components
+
+HELP
+    exit 0
+}
+
+# Function to install NVIDIA drivers only
+install_driver() {
+    echo ""
+    echo "=========================================================="
+    echo "   Installing NVIDIA Driver (Skipping Audit)             "
+    echo "=========================================================="
+
+    # NVIDIA Driver Installation for RHEL 9
+    echo "Installing dnf utils..."
+    dnf install -y dnf-utils
+
+    echo "Adding NVIDIA repo..."
+    dnf config-manager --add-repo https://developer.download.nvidia.com/compute/cuda/repos/rhel9/$(uname -i)/cuda-rhel9.repo
+
+    echo "Installing development packages..."
+    dnf install -y kernel-devel-$(uname -r) kernel-headers-$(uname -r) gcc make dkms
+
+    echo "Installing NVIDIA drivers..."
+    dnf module install -y nvidia-driver:550-dkms
+
+    echo ""
+    echo "=========================================================="
+    echo "   Driver Installation Complete                          "
+    echo "=========================================================="
+    echo ""
+
+    read -p "System restart required. Restart now? [y/n] > " restart_choice
+    if [ "$restart_choice" = "y" ]; then
+        shutdown -r now
+    else
+        echo "Please restart the system manually to complete driver installation."
+        exit 0
+    fi
+}
+
+# Function to install CUDA Toolkit
+install_cuda() {
+    echo ""
+    echo "=========================================================="
+    echo "   Installing CUDA Toolkit 12.x                          "
+    echo "=========================================================="
+    
+    if [ ! -f /etc/yum.repos.d/cuda-rhel9.repo ]; then
+        echo "Adding NVIDIA CUDA repo..."
+        dnf config-manager --add-repo https://developer.download.nvidia.com/compute/cuda/repos/rhel9/$(uname -i)/cuda-rhel9.repo
+    fi
+    
+    echo "Installing CUDA Toolkit..."
+    dnf install -y cuda-toolkit
+    
+    echo ""
+    echo "✓ CUDA Toolkit installed successfully"
+    echo "Add to your PATH: export PATH=/usr/local/cuda/bin:\$PATH"
+    echo "=========================================================="
+}
+
+# Function to install cuDNN
+install_cudnn() {
+    echo ""
+    echo "=========================================================="
+    echo "   Installing cuDNN 9 (CUDA 12.x optimized)             "
+    echo "=========================================================="
+    
+    if [ ! -f /etc/yum.repos.d/cuda-rhel9.repo ]; then
+        echo "Adding NVIDIA CUDA repo..."
+        dnf config-manager --add-repo https://developer.download.nvidia.com/compute/cuda/repos/rhel9/$(uname -i)/cuda-rhel9.repo
+    fi
+    
+    echo "Installing cuDNN..."
+    dnf install -y cudnn9-cuda-12
+    
+    echo ""
+    echo "✓ cuDNN 9 installed successfully"
+    echo "=========================================================="
+}
+
+# Function to install NVIDIA Container Toolkit
+install_container() {
+    echo ""
+    echo "=========================================================="
+    echo "   Installing NVIDIA Container Toolkit                  "
+    echo "=========================================================="
+    
+    echo "Adding NVIDIA Container Toolkit repo..."
+    dnf config-manager --add-repo https://nvidia.github.io/libnvidia-container/rhel9.0/nvidia-container-runtime.repo
+    
+    echo "Installing NVIDIA Container Runtime..."
+    dnf install -y nvidia-container-toolkit
+    
+    echo "Configuring Docker/Podman runtime..."
+    nvidia-ctk runtime configure --runtime=docker --install-dir=/usr/bin
+    
+    echo ""
+    echo "✓ NVIDIA Container Toolkit installed successfully"
+    echo "If using Docker: sudo systemctl restart docker"
+    echo "If using Podman: Configuration updated"
+    echo "=========================================================="
+}
+
+# Function to run hardware audit
+run_audit() {
+    echo "=========================================================="
+    echo "   Dell R720 & NVIDIA Tesla P40 Hardware Audit Tool       "
+    echo "=========================================================="
+
+    # 1. Ensure root privileges
+    if [[ $EUID -ne 0 ]]; then
+       echo "Error: This script must be run as root."
+       exit 1
+    fi
+
+    # Initialize audit results array
+    declare -a AUDIT_RESULTS
+    AUDIT_PASSED=0
+    AUDIT_TOTAL=4
+
+    # 2. Install required diagnostic tools
+    echo "[1/4] Installing diagnostic tools (pciutils, ipmitool, dmidecode)..."
+    dnf install -y pciutils ipmitool dmidecode > /dev/null 2>&1
+
+    # 3. Check for GPU Detection
+    echo "[2/4] Checking PCI bus for Tesla P40..."
+    GPU_COUNT=$(lspci -d 10de:1b38 | wc -l)
+    if [ "$GPU_COUNT" -gt 0 ]; then
+        echo "  ✓ SUCCESS: Found $GPU_COUNT NVIDIA Tesla P40(s)."
+        AUDIT_RESULTS+=("✓ GPU Detection: PASS")
+        ((AUDIT_PASSED++))
+        lspci -d 10de:1b38 -v | grep -E "VGA|3D|Memory"
+    else
+        echo "  ✗ ALERT: No Tesla P40 detected. Check your GPU Riser seating and power cables."
+        AUDIT_RESULTS+=("✗ GPU Detection: FAIL")
+    fi
+
+    # 4. Check Power Supply Capacity
+    echo "[3/4] Checking Power Supply Units (PSUs)..."
+    PSU_INFO=$(dmidecode -t 39 | grep "Capacity" | awk '{print $2}')
+    PSU_WARNING=false
+    for WATT in $PSU_INFO; do
+        echo "  - Found PSU with Capacity: ${WATT}W"
+        if [ "$WATT" -lt 1100 ]; then
+            echo "    * WARNING: Tesla P40 (250W) is recommended to have 1100W PSUs in an R720."
+            PSU_WARNING=true
+        fi
+    done
+    if [ "$PSU_WARNING" = true ]; then
+        AUDIT_RESULTS+=("⚠ PSU Capacity: WARNING")
+    else
+        AUDIT_RESULTS+=("✓ PSU Capacity: PASS")
+        ((AUDIT_PASSED++))
+    fi
+
+    # 5. Check "Above 4G Decoding" (Critical for P40 24GB)
+    echo "[4/4] Checking BIOS Memory Mapping (Above 4G Decoding)..."
+    if lspci -vd 10de:1b38 | grep -q "unassigned"; then
+        echo "  ✗ ALERT: GPU has unassigned memory regions. ENABLE 'Above 4G Decoding' in BIOS!"
+        AUDIT_RESULTS+=("✗ Memory Mapping: FAIL - Enable 4G Decoding in BIOS")
+    else
+        echo "  ✓ SUCCESS: Memory regions appear correctly mapped."
+        AUDIT_RESULTS+=("✓ Memory Mapping: PASS")
+        ((AUDIT_PASSED++))
+    fi
+
+    # Display Audit Summary
+    echo ""
+    echo "=========================================================="
+    echo "                    AUDIT SUMMARY                         "
+    echo "=========================================================="
+    for result in "${AUDIT_RESULTS[@]}"; do
+        echo "$result"
+    done
+    echo ""
+    echo "Status: $AUDIT_PASSED/$AUDIT_TOTAL checks passed"
+    echo "=========================================================="
+    echo ""
+
+    # Check if we should proceed
+    if [ "$AUDIT_PASSED" -lt 3 ]; then
+        echo "⚠ WARNING: Some critical checks failed. Review the alerts above."
+        echo "Proceeding with driver installation may cause issues."
+    fi
+
+    # Ask for confirmation before installing drivers
+    echo ""
+    echo "Review the audit results above carefully."
+    read -p "Proceed with NVIDIA Driver installation? [y/n] > " proceed
+    if [ "$proceed" != "y" ]; then
+        echo "Driver installation cancelled."
+        exit 0
+    fi
+
+    echo ""
+    echo "=========================================================="
+    echo "   Starting NVIDIA Driver Installation...               "
+    echo "=========================================================="
+
+    # NVIDIA Driver Installation for RHEL 9
+    echo "Installing dnf utils..."
+    dnf install -y dnf-utils
+
+    echo "Adding NVIDIA repo..."
+    dnf config-manager --add-repo https://developer.download.nvidia.com/compute/cuda/repos/rhel9/$(uname -i)/cuda-rhel9.repo
+
+    echo "Installing development packages..."
+    dnf install -y kernel-devel-$(uname -r) kernel-headers-$(uname -r) gcc make dkms
+
+    echo "Installing NVIDIA drivers..."
+    dnf module install -y nvidia-driver:550-dkms
+
+    echo ""
+    echo "=========================================================="
+    echo "   Driver Installation Complete                          "
+    echo "=========================================================="
+    echo ""
+
+    read -p "System restart required. Restart now? [y/n] > " restart_choice
+    if [ "$restart_choice" = "y" ]; then
+        shutdown -r now
+    else
+        echo "Please restart the system manually to complete driver installation."
+        echo ""
+        echo "After restart, you can install additional components:"
+        echo "  sudo $0 --cuda       # Install CUDA Toolkit"
+        echo "  sudo $0 --cudnn      # Install cuDNN"
+        echo "  sudo $0 --container  # Install Container Toolkit"
+        echo "  sudo $0 --all        # Install all components"
+        exit 0
+    fi
+}
+
+# Main script logic
+if [[ $EUID -ne 0 ]]; then
+   echo "Error: This script must be run as root."
+   exit 1
+fi
+
+case "${1:-}" in
+    --driver)
+        install_driver
+        ;;
+    --cuda)
+        install_cuda
+        ;;
+    --cudnn)
+        install_cudnn
+        ;;
+    --container)
+        install_container
+        ;;
+    --all)
+        install_cuda
+        install_cudnn
+        install_container
+        ;;
+    --help|-h)
+        usage
+        ;;
+    "")
+        run_audit
+        ;;
+    *)
+        echo "Unknown option: $1"
+        usage
+        ;;
+esac
