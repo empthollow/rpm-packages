@@ -65,8 +65,38 @@ get_max_temp() {
     echo "$max_temp"
 }
 
+reset_ipmi_controller() {
+    log "Resetting IPMI controller to clear any stuck states"
+    ipmitool mc reset cold 2>/dev/null || log "Warning: IPMI reset failed, continuing anyway"
+    
+    # Wait for IPMI to become responsive again (max 30 seconds)
+    local max_wait=30
+    local waited=0
+    log "Waiting for IPMI to reinitialize..."
+    
+    while [[ $waited -lt $max_wait ]]; do
+        sleep 2
+        waited=$((waited + 2))
+        
+        # Test if IPMI is responsive
+        if ipmitool mc info &>/dev/null; then
+            log "IPMI reinitialized after ${waited} seconds"
+            return 0
+        fi
+    done
+    
+    log "Warning: IPMI did not respond within ${max_wait}s, continuing anyway"
+}
+
+clear_fan_override() {
+    log "Checking and clearing any existing fan control overrides"
+    # Clear any active override (Dell-specific command)
+    ipmitool raw 0x30 0xce 0x00 0x16 0x05 0x00 0x00 0x00 0x05 0x00 0x00 0x00 0x00 2>/dev/null || log "Warning: Failed to clear override, continuing anyway"
+}
+
 toggle_manual_control() {
     local state=$1  # 0x01 = manual, 0x00 = factory auto
+    # Force enable manual mode without checking state (state check doesn't work reliably)
     ipmitool raw 0x30 0x30 0x01 "$state" 2>/dev/null || log "Warning: Failed to toggle manual control to $state"
 }
 
@@ -104,6 +134,10 @@ trap graceful_exit SIGINT SIGTERM EXIT
 log "Starting Dell R720 fan controller (GPU_COUNT=$GPU_COUNT, INTERVAL=${INTERVAL_SEC}s, THRESHOLD=${TEMP_THRESHOLD}°C)"
 log "Initial startup delay: ${INITIAL_START_DELAY_SEC}s"
 sleep "$INITIAL_START_DELAY_SEC"
+
+# Failsafe: Reset IPMI and clear overrides to ensure clean state
+reset_ipmi_controller
+clear_fan_override
 
 # Reset to factory auto on start
 toggle_manual_control 0x00
