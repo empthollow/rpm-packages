@@ -1,6 +1,6 @@
 # GPUKit - Dell R720 Dynamic Fan Speed Controller with GPU Support
 
-GPUKit is a comprehensive toolkit for managing Dell PowerEdge R720 servers with NVIDIA GPU support. It provides dynamic fan speed control, GPU monitoring, and automated NVIDIA driver setup.
+GPUKit is a comprehensive toolkit for managing Dell PowerEdge R720 servers with NVIDIA GPU support. This will likely work with other dell servers and is designed to work for cards using the nvidia-driver-550 support. This was created with Nvidia Tesla P40 cards. This package provides dynamic fan speed control, GPU monitoring, and automated NVIDIA driver setup.
 
 ## Components
 
