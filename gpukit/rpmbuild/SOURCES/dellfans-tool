@@ -1,0 +1,198 @@
+#!/bin/bash
+# Dell R720 Fan Controller Tool
+# Query and control fan speeds, temperatures, and service status
+
+set -euo pipefail
+
+SENSOR_INLET="04h"
+SENSOR_CPU1="0Eh"
+SENSOR_CPU2="0Fh"
+SERVICE_NAME="dellfans"
+
+usage() {
+    cat << EOF
+Usage: dellfans-tool [OPTION]
+
+Options:
+  status        Show service status
+  temps         Show current temperatures
+  fans          Show fan speeds (RPM)
+  logs          Show recent service logs (last 20 lines)
+  all           Show all information
+  ping          Check if IPMI controller is responsive
+  reset         Force a cold reset of the IPMI controller (requires root)
+  help          Display this help message
+
+Examples:
+  dellfans-tool status
+  dellfans-tool temps
+  dellfans-tool logs -n 50  # Last 50 log lines
+  dellfans-tool all
+  dellfans-tool ping
+  sudo dellfans-tool reset
+
+EOF
+    exit 0
+}
+
+require_root() {
+    if [[ $EUID -ne 0 ]]; then
+        echo "Error: This command requires root access (run with sudo)"
+        exit 1
+    fi
+}
+
+show_service_status() {
+    echo "=== Dellfans Service Status ==="
+    systemctl status "$SERVICE_NAME" --no-pager || true
+    echo ""
+}
+
+show_temps() {
+    echo "=== Current Temperatures ==="
+
+    if [[ $EUID -ne 0 ]]; then
+        echo "Warning: Root access required (run with sudo)"
+        echo ""
+        return
+    fi
+
+    local inlet=$(ipmitool sdr type temperature 2>/dev/null | grep "$SENSOR_INLET" | cut -d"|" -f5 | awk '{print $1}' || echo "N/A")
+    local cpu1=$(ipmitool sdr type temperature 2>/dev/null | grep "$SENSOR_CPU1" | cut -d"|" -f5 | awk '{print $1}' || echo "N/A")
+    local cpu2=$(ipmitool sdr type temperature 2>/dev/null | grep "$SENSOR_CPU2" | cut -d"|" -f5 | awk '{print $1}' || echo "N/A")
+
+    echo "Inlet Temp:  ${inlet}°C"
+    echo "CPU 1 Temp:  ${cpu1}°C"
+    echo "CPU 2 Temp:  ${cpu2}°C"
+
+    if command -v nvidia-smi &> /dev/null; then
+        echo ""
+        echo "GPU Temperatures:"
+        if nvidia-smi --query-gpu=index,name,temperature.gpu --format=csv,noheader,nounits 2>/dev/null | grep -q '^[0-9]'; then
+            nvidia-smi --query-gpu=index,name,temperature.gpu --format=csv,noheader,nounits | while IFS=, read -r idx name temp; do
+                echo "  GPU $idx ($name): ${temp}°C"
+            done
+        else
+            echo "  Warning: NVIDIA driver not loaded or GPUs not accessible"
+        fi
+    fi
+    echo ""
+}
+
+show_fans() {
+    echo "=== Fan Speeds (RPM) ==="
+
+    if [[ $EUID -ne 0 ]]; then
+        echo "Warning: Root access required (run with sudo)"
+        echo ""
+        return
+    fi
+
+    ipmitool sensor list 2>/dev/null | grep -i "fan" | grep -v "Redundancy" | awk '{print $1, $2, $3}' || echo "Unable to read fan speeds"
+    echo ""
+}
+
+show_logs() {
+    local lines=${1:-20}
+    echo "=== Recent Service Logs (last $lines lines) ==="
+    journalctl -u "$SERVICE_NAME" -n "$lines" --no-pager || echo "No logs found"
+    echo ""
+}
+
+show_all() {
+    show_service_status
+    show_temps
+    show_fans
+    show_logs 10
+}
+
+ping_ipmi() {
+    echo "=== IPMI Controller Status ==="
+
+    if [[ $EUID -ne 0 ]]; then
+        echo "Warning: Root access required (run with sudo)"
+        exit 1
+    fi
+
+    echo -n "Checking IPMI responsiveness... "
+    if ipmitool mc info &>/dev/null; then
+        echo "OK"
+        echo ""
+        ipmitool mc info
+    else
+        echo "UNRESPONSIVE"
+        echo ""
+        echo "IPMI controller is not responding. You may need to run: sudo dellfans-tool reset"
+        exit 1
+    fi
+    echo ""
+}
+
+force_cold_reset() {
+    require_root
+
+    echo "=== IPMI Cold Reset ==="
+    echo "Warning: This will reset the IPMI controller. Fan control will be interrupted temporarily."
+    echo -n "Sending cold reset command... "
+
+    if ipmitool mc reset cold 2>/dev/null; then
+        echo "sent"
+    else
+        echo "failed"
+        echo "Error: Failed to send cold reset command."
+        exit 1
+    fi
+
+    echo "Waiting for IPMI to reinitialize..."
+    local max_wait=60
+    local waited=0
+
+    while [[ $waited -lt $max_wait ]]; do
+        sleep 2
+        waited=$((waited + 2))
+        if ipmitool mc info &>/dev/null; then
+            echo "IPMI reinitialized after ${waited} seconds."
+            echo ""
+            echo "IPMI is now responsive. If dellfans service is running, restart it:"
+            echo "  sudo systemctl restart $SERVICE_NAME"
+            exit 0
+        fi
+        echo -n "."
+    done
+
+    echo ""
+    echo "Warning: IPMI did not respond within ${max_wait}s. It may still be initializing."
+    exit 1
+}
+
+# Parse arguments
+case "${1:-help}" in
+    status)
+        show_service_status
+        ;;
+    temps)
+        show_temps
+        ;;
+    fans)
+        show_fans
+        ;;
+    logs)
+        show_logs "${2:-20}"
+        ;;
+    all)
+        show_all
+        ;;
+    ping)
+        ping_ipmi
+        ;;
+    reset)
+        force_cold_reset
+        ;;
+    help|--help|-h)
+        usage
+        ;;
+    *)
+        echo "Unknown option: $1"
+        usage
+        ;;
+esac

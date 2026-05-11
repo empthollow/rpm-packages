@@ -6,7 +6,7 @@ Summary:        Dell R720 Dynamic Fan Speed Controller with GPU support
 License:        MIT
 URL:            https://github.com/empthollow/scripts
 Source0:        dellfans
-Source1:        dellfans-status
+Source1:        dellfans-tool
 Source2:        dellfans.service
 Source3:        nvidia-rhel-setup
 
@@ -24,7 +24,7 @@ Supports up to 2 NVIDIA GPUs via nvidia-smi.
 
 %install
 install -D -m 0755 %{SOURCE0} %{buildroot}%{_sbindir}/dellfans
-install -D -m 0755 %{SOURCE1} %{buildroot}%{_sbindir}/dellfans-status
+install -D -m 0755 %{SOURCE1} %{buildroot}%{_sbindir}/dellfans-tool
 install -D -m 0644 %{SOURCE2} %{buildroot}%{_unitdir}/dellfans.service
 install -D -m 0755 %{SOURCE3} %{buildroot}%{_sbindir}/nvidia-rhel-setup
 
@@ -53,7 +53,7 @@ systemctl daemon-reload
 
 %files
 %{_sbindir}/dellfans
-%{_sbindir}/dellfans-status
+%{_sbindir}/dellfans-tool
 %{_sbindir}/nvidia-rhel-setup
 %{_unitdir}/dellfans.service
 

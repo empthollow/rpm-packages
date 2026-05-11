@@ -12,6 +12,7 @@ TEMP_THRESHOLD=${TEMP_THRESHOLD:-35}  # Above this, use factory auto
 MIN_FAN_PCT=${MIN_FAN_PCT:-10}
 MAX_FAN_PCT=${MAX_FAN_PCT:-100}
 GPU_COUNT=${GPU_COUNT:-2}  # Number of GPUs to monitor
+COLD_RESET=${COLD_RESET:-0}  # Set to 1 to force IPMI cold reset on startup
 
 # IPMI sensor references
 INLET_TEMP_SENSOR="04h"   # Inlet Temp
@@ -81,6 +82,8 @@ reset_ipmi_controller() {
         # Test if IPMI is responsive
         if ipmitool mc info &>/dev/null; then
             log "IPMI reinitialized after ${waited} seconds"
+            # Give extra time for IPMI to fully stabilize after reset
+            sleep 3
             return 0
         fi
     done
@@ -107,8 +110,9 @@ set_fan_speed() {
 }
 
 reset_to_factory_auto() {
+    local reason=${1:-""}
     if [[ $FCTRL -eq 1 ]]; then
-        log "Resetting to factory auto control"
+        log "Resetting to factory auto control${reason:+ (reason: $reason)}"
         toggle_manual_control 0x00
         FCTRL=0
     fi
@@ -124,7 +128,7 @@ set_manual_control() {
 
 graceful_exit() {
     log "Shutting down - restoring factory auto control"
-    toggle_manual_control 0x01
+    toggle_manual_control 0x00
     exit 0
 }
 
@@ -135,9 +139,16 @@ log "Starting Dell R720 fan controller (GPU_COUNT=$GPU_COUNT, INTERVAL=${INTERVA
 log "Initial startup delay: ${INITIAL_START_DELAY_SEC}s"
 sleep "$INITIAL_START_DELAY_SEC"
 
-# Failsafe: Reset IPMI and clear overrides to ensure clean state
-reset_ipmi_controller
+# Optionally reset IPMI controller on startup (disabled by default - can cause sensor instability)
+if [[ $COLD_RESET -eq 1 ]]; then
+    reset_ipmi_controller
+else
+    log "Skipping IPMI cold reset (set COLD_RESET=1 to enable)"
+fi
 clear_fan_override
+
+# Give IPMI extra time to fully stabilize before sending control commands
+sleep 2
 
 # Reset to factory auto on start
 toggle_manual_control 0x00
@@ -153,7 +164,7 @@ while true; do
     fi
     
     if [[ $T -ge $TEMP_THRESHOLD ]]; then
-        reset_to_factory_auto
+        reset_to_factory_auto "temp=${T}°C >= threshold=${TEMP_THRESHOLD}°C"
     else
         # Less aggressive curve below 80°C
         if [[ $T -lt 80 ]]; then
