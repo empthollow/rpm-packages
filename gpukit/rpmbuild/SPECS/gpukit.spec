@@ -1,6 +1,6 @@
 Name:           gpukit
 Version:        1.0
-Release:        1%{?dist}
+Release:        4%{?dist}
 Summary:        Dell R720 Dynamic Fan Speed Controller with GPU support
 
 License:        MIT
@@ -58,7 +58,7 @@ systemctl daemon-reload
 %{_unitdir}/dellfans.service
 
 %changelog
-* Sat Dec 27 2025 shoestring <user@localhost> - 1.0-1
+* Sat May 10 2026 shoestring <user@localhost> - 1.0-1
 - Initial release
 - Dynamic fan control with GPU support
 - Systemd service integration

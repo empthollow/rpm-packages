@@ -21,6 +21,8 @@ Options:
   all           Show all information
   ping          Check if IPMI controller is responsive
   reset         Force a cold reset of the IPMI controller (requires root)
+  mode          Show current IPMI fan control mode (manual or factory auto)
+  fix-pcie      Disable third-party PCIe fan override (stops iDRAC overriding manual speeds)
   help          Display this help message
 
 Examples:
@@ -128,6 +130,56 @@ ping_ipmi() {
     echo ""
 }
 
+show_fan_mode() {
+    require_root
+
+    echo "=== Fan Control Mode ==="
+
+    # iDRAC on R720 does not support reading the manual mode bit via raw command.
+    # Use service state as the authoritative source instead.
+    local svc_active
+    svc_active=$(systemctl is-active "$SERVICE_NAME" 2>/dev/null || true)
+    echo "Service:  $svc_active"
+
+    if [[ "$svc_active" == "active" ]]; then
+        local last_entry
+        last_entry=$(journalctl -u "$SERVICE_NAME" --no-pager -n 200 2>/dev/null \
+            | grep -E "Enabled manual fan control|Shutting down|restoring factory auto" \
+            | tail -1 || true)
+
+        if echo "$last_entry" | grep -q "Enabled manual fan control"; then
+            echo "Mode:     MANUAL (dellfans is controlling fan speeds)"
+        elif echo "$last_entry" | grep -q "Shutting down\|restoring factory auto"; then
+            echo "Mode:     FACTORY AUTO (service stopped cleanly)"
+        else
+            echo "Mode:     UNKNOWN (no control state in recent logs)"
+        fi
+    else
+        echo "Mode:     FACTORY AUTO (service is not running)"
+    fi
+
+    echo ""
+
+    # Check third-party PCIe cooling response — byte 8 of response is the flag
+    # 01 = enabled (iDRAC overriding manual speeds for non-Dell cards like P40)
+    # 00 = disabled (manual control respected)
+    local pcie_raw
+    pcie_raw=$(ipmitool raw 0x30 0xce 0x01 0x16 0x05 0x00 0x00 0x00 2>/dev/null) || pcie_raw=""
+    local pcie_byte
+    pcie_byte=$(echo "$pcie_raw" | awk '{print $8}' | tr -d ' \n')
+
+    echo "Third-party PCIe fan override: raw='$pcie_raw'"
+    if [[ "$pcie_byte" == "01" ]]; then
+        echo "  WARNING: ENABLED — iDRAC is overriding manual fan speeds for non-Dell cards (P40)."
+        echo "           Run: sudo dellfans-tool fix-pcie"
+    elif [[ "$pcie_byte" == "00" ]]; then
+        echo "  OK: DISABLED — iDRAC will not override fan speeds for non-Dell cards."
+    else
+        echo "  UNKNOWN (byte 8: '$pcie_byte')"
+    fi
+    echo ""
+}
+
 force_cold_reset() {
     require_root
 
@@ -165,6 +217,24 @@ force_cold_reset() {
     exit 1
 }
 
+fix_pcie_override() {
+    require_root
+
+    echo "=== Disable Third-Party PCIe Fan Override ==="
+    echo "Sending command to disable iDRAC third-party PCIe cooling response..."
+
+    if ipmitool raw 0x30 0xce 0x00 0x16 0x05 0x00 0x00 0x00 0x05 0x00 0x00 0x00 0x00 2>/dev/null; then
+        echo "Done."
+        echo ""
+        echo "iDRAC will no longer override manual fan speeds for non-Dell PCIe cards."
+        echo "Run 'sudo dellfans-tool mode' to confirm the PCIe response is now disabled."
+    else
+        echo "Error: Command failed. Check if IPMI is responsive: sudo dellfans-tool ping"
+        exit 1
+    fi
+    echo ""
+}
+
 # Parse arguments
 case "${1:-help}" in
     status)
@@ -187,6 +257,12 @@ case "${1:-help}" in
         ;;
     reset)
         force_cold_reset
+        ;;
+    mode)
+        show_fan_mode
+        ;;
+    fix-pcie)
+        fix_pcie_override
         ;;
     help|--help|-h)
         usage

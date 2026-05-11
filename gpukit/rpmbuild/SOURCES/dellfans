@@ -8,7 +8,6 @@ set -euo pipefail
 # Configuration (can be overridden by environment variables)
 INTERVAL_SEC=${INTERVAL_SEC:-5}
 INITIAL_START_DELAY_SEC=${INITIAL_START_DELAY_SEC:-10}
-TEMP_THRESHOLD=${TEMP_THRESHOLD:-35}  # Above this, use factory auto
 MIN_FAN_PCT=${MIN_FAN_PCT:-10}
 MAX_FAN_PCT=${MAX_FAN_PCT:-100}
 GPU_COUNT=${GPU_COUNT:-2}  # Number of GPUs to monitor
@@ -109,15 +108,6 @@ set_fan_speed() {
     ipmitool raw 0x30 0x30 0x02 0xff "$hex" 2>/dev/null || log "Warning: Failed to set fan speed to $pct%"
 }
 
-reset_to_factory_auto() {
-    local reason=${1:-""}
-    if [[ $FCTRL -eq 1 ]]; then
-        log "Resetting to factory auto control${reason:+ (reason: $reason)}"
-        toggle_manual_control 0x00
-        FCTRL=0
-    fi
-}
-
 set_manual_control() {
     if [[ $FCTRL -eq 0 ]]; then
         toggle_manual_control 0x01
@@ -135,7 +125,7 @@ graceful_exit() {
 trap graceful_exit SIGINT SIGTERM EXIT
 
 # Main loop
-log "Starting Dell R720 fan controller (GPU_COUNT=$GPU_COUNT, INTERVAL=${INTERVAL_SEC}s, THRESHOLD=${TEMP_THRESHOLD}°C)"
+log "Starting Dell R720 fan controller (GPU_COUNT=$GPU_COUNT, INTERVAL=${INTERVAL_SEC}s)"
 log "Initial startup delay: ${INITIAL_START_DELAY_SEC}s"
 sleep "$INITIAL_START_DELAY_SEC"
 
@@ -163,25 +153,21 @@ while true; do
         continue
     fi
     
-    if [[ $T -ge $TEMP_THRESHOLD ]]; then
-        reset_to_factory_auto "temp=${T}°C >= threshold=${TEMP_THRESHOLD}°C"
+    # Less aggressive curve below 80°C
+    if [[ $T -lt 80 ]]; then
+        PCT=$(( 3 * ( T / 5 ) ))  # ~0.6% per degree
     else
-        # Less aggressive curve below 80°C
-        if [[ $T -lt 80 ]]; then
-            PCT=$(( 3 * ( T / 5 ) ))  # ~0.6% per degree
-        else
-            PCT=$(( 5 * ( T / 5 ) ))  # ~1% per degree (more aggressive above 80°C)
-        fi
-        
-        PCT=$(( PCT < MIN_FAN_PCT ? MIN_FAN_PCT : PCT ))
-        PCT=$(( PCT > MAX_FAN_PCT ? MAX_FAN_PCT : PCT ))
-        
-        if [[ $LAST_PCT -ne $PCT ]]; then
-            set_manual_control
-            set_fan_speed "$PCT"
-            log "Temp: ${T}°C - Set fans to ${PCT}% (Inlet=$(get_ipmi_temp "$INLET_TEMP_SENSOR")°C, GPU0=$(get_gpu_temp 0)°C, GPU1=$(get_gpu_temp 1)°C)"
-            LAST_PCT=$PCT
-        fi
+        PCT=$(( 5 * ( T / 5 ) ))  # ~1% per degree (more aggressive above 80°C)
+    fi
+    
+    PCT=$(( PCT < MIN_FAN_PCT ? MIN_FAN_PCT : PCT ))
+    PCT=$(( PCT > MAX_FAN_PCT ? MAX_FAN_PCT : PCT ))
+    
+    if [[ $LAST_PCT -ne $PCT ]]; then
+        set_manual_control
+        set_fan_speed "$PCT"
+        log "Temp: ${T}°C - Set fans to ${PCT}% (Inlet=$(get_ipmi_temp "$INLET_TEMP_SENSOR")°C, GPU0=$(get_gpu_temp 0)°C, GPU1=$(get_gpu_temp 1)°C)"
+        LAST_PCT=$PCT
     fi
     
     sleep "$INTERVAL_SEC"
