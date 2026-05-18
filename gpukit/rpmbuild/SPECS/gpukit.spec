@@ -1,6 +1,6 @@
 Name:           gpukit
 Version:        1.0
-Release:        4%{?dist}
+Release:        6%{?dist}
 Summary:        Dell R720 Dynamic Fan Speed Controller with GPU support
 
 License:        MIT

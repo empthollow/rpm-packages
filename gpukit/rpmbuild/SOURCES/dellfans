@@ -153,9 +153,9 @@ while true; do
         continue
     fi
     
-    # Less aggressive curve below 80°C
+    # Gentler curve below 80°C (~0.33% per degree), steeper above
     if [[ $T -lt 80 ]]; then
-        PCT=$(( 3 * ( T / 5 ) ))  # ~0.6% per degree
+        PCT=$(( T / 4 ))  # ~0.25% per degree (e.g. 64°C → ~16%, 75°C → ~18%)
     else
         PCT=$(( 5 * ( T / 5 ) ))  # ~1% per degree (more aggressive above 80°C)
     fi
